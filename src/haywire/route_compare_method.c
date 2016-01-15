@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <haywire.h>
 #include "route_compare_method.h"
 
 typedef struct hw_route_token_st {
@@ -55,7 +56,7 @@ int hw_route_compare_method(hw_string* url, char* route)
         }
         else
         {
-            match = hw_strcmp(route_token.string, request_token.string);
+            match = hw_strcmp(&route_token.string, &request_token.string);
             if (!match)
             {
                 equal = 1;
