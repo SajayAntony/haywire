@@ -20,6 +20,7 @@
 #include "http_response_cache.h"
 #include "server_stats.h"
 #include "configuration/configuration.h"
+#include "http_connection.h"
 
 #define UVERR(err, msg) fprintf(stderr, "%s: %s\n", msg, uv_strerror(err))
 #define CHECK(r, msg) \
@@ -272,11 +273,21 @@ void http_stream_on_close(uv_handle_t* handle)
     }
 }
 
+void http_stream_close_connection(http_connection* connection) {
+    if (connection->state == OPEN) {
+        connection->state = CLOSING;
+        uv_close(&connection->stream, http_stream_on_close);
+    }
+}
+
 void handle_request_error(http_connection* connection)
 {
     uv_handle_t* stream = &connection->stream;
 
-    uv_read_stop(stream);
+    if (connection->state == OPEN) {
+        uv_read_stop(stream);
+    }
+
     connection->keep_alive = false;
 
     if (connection->request) {
@@ -284,9 +295,8 @@ void handle_request_error(http_connection* connection)
             /* Send the error message back. */
             http_request_on_message_complete(&connection->parser);
         }
-    } else if (connection->state == OPEN) {
-        connection->state = CLOSING;
-        uv_close(stream, http_stream_on_close);
+    } else {
+        http_stream_close_connection(connection);
     }
 }
 
@@ -322,7 +332,7 @@ void http_stream_on_shutdown(uv_shutdown_t* req, int status)
     http_connection* connection = req->data;
     uv_handle_t* stream = &connection->stream;
     if (connection->state == OPEN) {
-        uv_close(stream, http_stream_on_close);
+        http_stream_close_connection(connection);
     }
     free(req);
 }
@@ -358,7 +368,10 @@ void http_stream_on_read_http_parser(uv_stream_t* tcp, ssize_t nread, const uv_b
         req->data = connection;
         uv_shutdown(req, &connection->stream, http_stream_on_shutdown);
     }
-    else {
+    else if (nread == UV_ECONNRESET || nread == UV_ECONNABORTED) {
+        /* Let's close the connection as the other peer just disappeared */
+        http_stream_close_connection(connection);
+    } else {
         /* We didn't see this coming, but an unexpected UV error code was passed in, so we'll
          * respond with a blanket 500 error if we can */
         handle_internal_error(connection);
@@ -376,7 +389,7 @@ int http_server_write_response_single(hw_write_context* write_context, hw_string
 {
     http_connection* connection = write_context->connection;
 
-    if (connection->state != CLOSED) {
+    if (connection->state == OPEN) {
         uv_write_t *write_req = (uv_write_t *) malloc(sizeof(*write_req) + sizeof(uv_buf_t));
         uv_buf_t *resbuf = (uv_buf_t *) (write_req + 1);
 
@@ -409,8 +422,7 @@ void http_server_after_write(uv_write_t* req, int status)
     http_connection* connection = write_context->connection;
 
     if (!connection->keep_alive && connection->state == OPEN) {
-        connection->state = CLOSING;
-        uv_close(stream, http_stream_on_close);
+        http_stream_close_connection(connection);
     }
     
     if (write_context->callback)
